@@ -1,0 +1,2 @@
+#!/usr/bin/env bb
+(require (quote ctr.main)) (apply ctr.main/-main *command-line-args*)
