@@ -72,7 +72,7 @@ ctr create     [<config>] [--start|-s] [--update-changed|-u] [--restart-changed|
                [--[no-]legacy-install-dirs] [--build-args <arg>...]
 ctr build      [<config>] [<create options>]
 ctr list
-ctr new-config <name> [--address-prefix <a.b.c>] [--no-network] [--auto-start]
+ctr new-config <name> [--address-prefix <a.b.c>] [--network <nat|iface>] [--no-network] [--auto-start]
                [--state-version <ver>]
 ctr shell      <name> [--start] [--timeout <seconds>]
 ctr run        <name> [--start] [--timeout <seconds>] [--] <cmd> [<arg>...]
@@ -124,6 +124,46 @@ interfaces, are skipped.
 
 `system.stateVersion` is pinned because the default tracks whichever nixpkgs
 built the container, which silently changes under you on an upgrade.
+
+### Bridging onto an interface
+
+Instead of a private, NATted subnet you can join the container to one of the
+host's own networks by passing the interface name to `--network`:
+
+```bash
+$ ctr new-config web --network=br0
+# Written by `ctr new-config web` on 2026-08-22.
+{
+  containers.web = {
+    autoStart = false;
+
+    privateNetwork = true;
+    hostBridge = "br0";
+    # container 192.168.1.50/24 on the br0 network
+    localAddress = "192.168.1.50/24";
+
+    config = { pkgs, ... }: {
+      # Pinned at creation time. Do not change it
+      # to "upgrade" the container.
+      system.stateVersion = "26.05";
+
+      environment.systemPackages = with pkgs; [ ];
+    };
+  };
+}
+```
+
+The container joins the interface's own subnet, at the lowest free host address
+ctr can find there. ctr skips the network base, `.1` (usually the router or
+gateway), the broadcast address, the host's own addresses on that interface,
+and any address another container is already bridged to. If the interface has
+no IPv4 address, or the subnet is exhausted, `--network` refuses to emit a
+config.
+
+Bridged containers share a real LAN, so anything else on it — devices ctr does
+not manage, DHCP — can still collide. ctr only guarantees no clash with the host
+and with its own containers; check the LAN before bringing a bridged container
+up.
 
 ```bash
 ctr new-config web > web.nix

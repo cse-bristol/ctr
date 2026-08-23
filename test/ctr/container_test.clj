@@ -165,24 +165,33 @@
                                (c/read-conf (str p))))]
     (testing "a private container with a static address"
       (is (= {:auto-start? true :private-network? true
+              :host-bridge nil
               :host-address "10.233.1.1" :local-address "10.233.1.2"}
              (at (sup/conf :auto-start true :private-network true
                            :host-address "10.233.1.1"
                            :local-address "10.233.1.2")))))
     (testing "a host-network container"
       (is (= {:auto-start? false :private-network? false
+              :host-bridge nil
               :host-address nil :local-address nil}
              (at (sup/conf)))))
     (testing "private but with no address: bridged or DHCP"
       (is (= {:auto-start? false :private-network? true
+              :host-bridge nil
               :host-address nil :local-address nil}
              (at (sup/conf :private-network true)))))
+    (testing "a container bridged onto an interface"
+      (is (= {:auto-start? false :private-network? true
+              :host-bridge "br0"
+              :host-address nil :local-address "192.168.1.50"}
+             (at "PRIVATE_NETWORK=1\nHOST_BRIDGE=br0\nLOCAL_ADDRESS=192.168.1.50/24\n"))))
     (testing "PRIVATE_NETWORK absent means host network, as the module emits"
       (is (not (:private-network? (at "SYSTEM_PATH=/nix/store/x\n")))))
     (testing "and an explicit 0, as `nixos-container create` writes"
       (is (not (:private-network? (at "PRIVATE_NETWORK=0\n")))))
     (testing "a conf that isn't there yields all-nil rather than throwing"
       (is (= {:auto-start? false :private-network? false
+              :host-bridge nil
               :host-address nil :local-address nil}
              (c/read-conf (str (fs/path dir "absent.conf"))))))
     (fs/delete-tree dir)))

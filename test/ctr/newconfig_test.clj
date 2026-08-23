@@ -67,11 +67,43 @@
     (is (str/includes? t "autoStart = true;"))))
 
 (deftest the-template-is-a-nix-expression-that-evaluates
+(deftest free-bridge-address-picks-inside-the-subnet
+  (is (= "192.168.1.2" (nc/free-bridge-address "192.168.1.0/24" [] [])))
+  (testing "the network base, .1 and the broadcast are never handed out"
+    (is (= "10.0.0.2" (nc/free-bridge-address "10.0.0.0/8" [] ["10.0.0.1"]))))
+  (testing "the host's own address is skipped"
+    (is (= "192.168.1.3" (nc/free-bridge-address "192.168.1.0/24" [] ["192.168.1.2"]))))
+  (testing "containers already bridged to the same interface are skipped"
+    (is (= "192.168.1.3" (nc/free-bridge-address "192.168.1.0/24"
+                                                 ["192.168.1.2" "192.168.1.4"] [])))
+    (testing "gaps are reused"
+      (is (= "192.168.1.4" (nc/free-bridge-address "192.168.1.0/24"
+                                                   ["192.168.1.2" "192.168.1.3"] [])))))
+  (testing "a full network is an error, not a hang"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (nc/free-bridge-address "10.0.0.1/32" [] [])))))
+
+(deftest the-template-bridges-onto-a-named-interface
+  (let [t (nc/template (assoc opts :bridge "br0" :local "192.168.1.50/24"))]
+    (is (str/includes? t "privateNetwork = true;"))
+    (is (str/includes? t "hostBridge = \"br0\";"))
+    (is (str/includes? t "localAddress = \"192.168.1.50/24\";"))
+    (is (not (str/includes? t "addressPrefix")))
+    (is (not (str/includes? t "enableWAN")))
+    (is (str/includes? t "system.stateVersion = \"26.05\";"))))
+
+(deftest generate-refuses-conflicting-network-options
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot be combined"
+                        (nc/generate "web" {:no-network true :network "br0"})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Cannot combine"
+                        (nc/generate "web" {:address-prefix "10.1.2" :network "br0"}))))
   ;; Parsing alone is not enough: `<nixpkgs>/nixos` parses fine and fails only
   ;; on evaluation. Both forms of the template are checked.
   (if-not (fs/which "nix")
     (println "  (skipping template evaluation: nix is not on PATH)")
-    (doseq [t [(nc/template opts) (nc/template (assoc opts :prefix nil))]]
+    (doseq [t [(nc/template opts)
+               (nc/template (assoc opts :prefix nil))
+               (nc/template (assoc opts :bridge "br0" :local "192.168.1.50/24"))]]
       (let [dir (sup/tmpdir)
             f   (str (fs/path dir "c.nix"))]
         (spit f t)

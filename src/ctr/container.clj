@@ -84,6 +84,7 @@
      ;; The declarative module writes PRIVATE_NETWORK=1 or nothing at all;
      ;; `nixos-container create` writes an explicit 0. Only 1 means private.
      :private-network? (= "1" (vals "PRIVATE_NETWORK"))
+     :host-bridge      (some-> (vals "HOST_BRIDGE") not-empty)
      :host-address     (addr "HOST_ADDRESS")
      :local-address    (addr "LOCAL_ADDRESS")}))
 

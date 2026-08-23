@@ -35,7 +35,15 @@
                                  "--no-network" "--auto-start"]
                                 @#'main/newconfig-opts)]
     (is (= ["web"] args))
-    (is (= {:address-prefix "10.1.2" :no-network true :auto-start true} opts))))
+    (is (= {:address-prefix "10.1.2" :no-network true :auto-start true}
+           ; network is absent, not "nat", so newconfig can tell "not given"
+           (dissoc opts :network))))
+  (testing "--network takes the interface to bridge onto"
+    (let [[_ opts] (main/parse ["web" "--network" "br0"] @#'main/newconfig-opts)]
+      (is (= {:network "br0"} opts))))
+  (testing "--network nat is explicit and parses like the default"
+    (let [[_ opts] (main/parse ["web" "--network" "nat"] @#'main/newconfig-opts)]
+      (is (= {:network "nat"} opts)))))
 
 (deftest destroy-accepts-all
   (let [[args opts] (main/parse ["-a"] @#'main/destroy-opts)]

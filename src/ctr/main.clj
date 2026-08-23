@@ -53,12 +53,18 @@ ctr build [<config>] [<create options>]
 ctr list
     List the containers ctr has installed, with their status and address.
 
-ctr new-config <name> [--address-prefix <a.b.c>] [--no-network]
-               [--auto-start] [--state-version <ver>]
+ctr new-config <name> [--address-prefix <a.b.c>] [--network <nat|iface>]
+               [--no-network] [--auto-start] [--state-version <ver>]
 
-    Print a starting-point config for a new container. The address prefix is
-    chosen to clash with neither an existing container nor a host interface,
-    and system.stateVersion is pinned to the release ctr would build with.
+    Print a starting-point config for a new container. The address is chosen
+    to clash with neither an existing container nor a host interface, and
+    system.stateVersion is pinned to the release ctr would build with.
+
+    --network nat      Give the container a private 10.233.n subnet with the
+                       host at .1 and container at .2, NATted out of the host
+                       interface (the default).
+    --network <iface>  Bridge the container onto interface <iface>. A free
+                       address is picked on that interface's own network.
 
 ctr shell <name> [--start] [--timeout <seconds>]
     Open a root shell inside a running container.
@@ -99,6 +105,7 @@ ctr destroy --all|-a
 
 (def ^:private newconfig-opts
   {:address-prefix {}
+   :network        {}
    :state-version  {}
    :no-network     {:coerce :boolean}
    :auto-start     {:coerce :boolean}})

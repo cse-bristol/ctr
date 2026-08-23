@@ -16,6 +16,12 @@
   (reduce (fn [acc octet] (+ (* acc 256) (parse-long octet)))
           0 (str/split s #"\.")))
 
+(defn- long->ip [n]
+  (str/join "." [(bit-and (bit-shift-right n 24) 0xff)
+                 (bit-and (bit-shift-right n 16) 0xff)
+                 (bit-and (bit-shift-right n 8) 0xff)
+                 (bit-and n 0xff)]))
+
 (defn cidr-range
   "Inclusive [first last] of a dotted-quad CIDR, as longs."
   [cidr]
@@ -64,11 +70,67 @@
                              [host-address local-address])))
            (remove nil?)))))
 
+(defn host-interface-cidrs
+  "IPv4 CIDRs configured on this host's interfaces, as [iface cidr] pairs.
+   `ip -4 -o addr show` emits one line per address, with the interface name
+   before `inet`."
+  []
+  (->> (str/split-lines (:out (u/run "ip" "-4" "-o" "addr" "show")))
+       (keep #(let [[_ iface cidr] (re-find #"^\d+: (\S+)\s+inet ([\d.]+\/[\d.]+)" %)]
+                (when (and iface cidr) [iface cidr])))))
+
 (defn host-cidrs
   "IPv4 CIDRs configured on this host's interfaces."
   []
-  (->> (str/split-lines (:out (u/run "ip" "-4" "-o" "addr" "show")))
-       (keep #(second (re-find #"\binet (\d+\.\d+\.\d+\.\d+/\d+)" %)))))
+  (mapv second (host-interface-cidrs)))
+
+(defn host-cidr-for
+  "The first IPv4 CIDR configured on interface `iface`. Dies if it has none,
+   because there is then nothing to pick a bridged address from."
+  [iface]
+  (or (some (fn [[i cidr]] (when (= i iface) cidr)) (host-interface-cidrs))
+      (u/die (str "Interface '" iface "' has no IPv4 address, so there is"
+                  " nothing to bridge onto; check the interface name."))))
+
+(defn- host-ips-on
+  "This host's bare IPv4 addresses configured on interface `iface`."
+  [iface]
+  (->> (host-interface-cidrs)
+       (keep (fn [[i cidr]] (when (= i iface) (first (str/split cidr #"/")))))))
+
+(defn- used-bridge-ips
+  "Bare local addresses of installed containers bridged onto `iface`."
+  [iface]
+  (let [dir (c/conf-dir)]
+    (when (fs/directory? dir)
+      (->> (fs/glob dir "*.conf")
+           (keep (fn [f] (let [{:keys [host-bridge local-address]} (c/read-conf (str f))]
+                           (when (= host-bridge iface) local-address))))))))
+
+(defn- ip4-long
+  "Dotted quad, with an optional prefix length, as a long."
+  [s]
+  (ip->long (str/replace s #"/.*$" "")))
+
+(defn free-bridge-address
+  "Lowest free host address inside CIDR `cidr` for a bridged container, as a
+   bare dotted quad. The network base, its broadcast, the `.1` address
+   (conventionally a router or gateway) and the host's own addresses on the
+   interface are all skipped, as is any container already bridged there."
+  [cidr used-ips host-ips]
+  (let [[base last] (cidr-range cidr)
+        used (set (concat (map ip4-long used-ips) (map ip4-long host-ips)))]
+    (or (some-> (first (filter #(not (used %)) (range (+ base 2) last)))
+                long->ip)
+        (u/die (str "No free address in '" cidr "' to bridge a container onto.")))))
+
+(defn- pick-bridge-address
+  "The address -- `ip/len` -- for a new container bridged to `iface`."
+  [iface]
+  (let [cidr (host-cidr-for iface)
+        len  (parse-long (or (second (str/split cidr #"/")) "32"))]
+    (str (free-bridge-address cidr (used-bridge-ips iface) (host-ips-on iface))
+         "/" len)))
 
 (defn- release-of
   "The nixpkgs release, read straight from its .version file -- which is what
@@ -96,7 +158,7 @@
 
 (defn template
   "The generated config. Pure, so it can be evaluated in a test."
-  [{:keys [name prefix state-version auto-start? date]}]
+  [{:keys [name prefix bridge local state-version auto-start? date]}]
   (str/join
    "\n"
    (concat
@@ -106,7 +168,16 @@
      (str "  containers." (nix-attr name) " = {")
      (str "    autoStart = " (if auto-start? "true" "false") ";")
      ""]
-    (when prefix
+    (cond
+      bridge
+      [;; Bridged: the container joins the interface's own network.
+       "    privateNetwork = true;"
+       (str "    hostBridge = \"" bridge "\";")
+       (str "    # container " local " on the " bridge " network")
+       (str "    localAddress = \"" local "\";")
+       ""]
+
+      prefix
       [(str "    # host " prefix ".1, container " prefix ".2")
        (str "    extra.addressPrefix = \"" prefix "\";")
        "    extra.enableWAN = true;"
@@ -134,13 +205,29 @@
                      " privateNetwork."))))
 
 (defn generate
-  "Render a template for `nm`, allocating an address unless told not to."
-  [nm {:keys [address-prefix no-network auto-start date] version :state-version}]
-  (let [network? (not no-network)]
-    (check-name! nm network?)
-    (template {:name nm
-               :prefix (when network?
-                         (or address-prefix (pick-prefix (used-addresses) (host-cidrs))))
-               :state-version (or version (state-version))
-               :auto-start? auto-start
-               :date date})))
+  "Render a template for `nm`, unless told not to.
+
+   The network mode comes from `:network`: `nat` (or missing) gives the usual
+   private 10.233.x subnet with the host at .1 and container at .2, NATted out
+   of the host's interface; any other value is a bridge interface, and a free
+   address is allocated on that interface's own network."
+  [nm {:keys [address-prefix no-network auto-start date network] version :state-version}]
+  (let [bridge?  (and (some? network) (not= network "nat"))
+        private? (and (not no-network) (not bridge?))]
+    (when (and bridge? no-network)
+      (u/die (str "--network " network " and --no-network cannot be combined.")))
+    (when (and bridge? address-prefix)
+      (u/die (str "Cannot combine --network " network " with --address-prefix:"
+                  " bridged containers take their address from the bridge"
+                  " interface, not from a prefix.")))
+    (check-name! nm (not no-network))
+    (template
+     (merge {:name          nm
+             :state-version (or version (state-version))
+             :auto-start?   auto-start
+             :date          date}
+            (if bridge?
+              {:bridge network :local (pick-bridge-address network)}
+              {:prefix (when private?
+                         (or address-prefix
+                             (pick-prefix (used-addresses) (host-cidrs))))})))))
