@@ -1,7 +1,8 @@
 (ns ctr.systemd
   "Talking to systemd, machinectl and nixos-container, plus the start/update/
    restart decision for a set of containers."
-  (:require [clojure.set :as set]
+  (:require [babashka.fs :as fs]
+            [clojure.set :as set]
             [clojure.string :as str]
             [ctr.util :as u]))
 
@@ -98,11 +99,14 @@
   (ensure-running! "run" nm opts)
   (u/exec-status {} "nixos-container" "run" nm "--" cmd))
 
-(defn- system-path
-  "The SYSTEM_PATH= value from an installed container conf."
+(defn system-path
+  "The SYSTEM_PATH= value from a container conf, or nil if the conf has none or
+   is not there. That store path is the human-readable identity of a deploy,
+   which is what `ctr history` shows."
   [conf]
-  (some #(second (re-matches #"SYSTEM_PATH=(.*)" %))
-        (str/split-lines (slurp (str conf)))))
+  (when (fs/exists? (str conf))
+    (some #(second (re-matches #"SYSTEM_PATH=(.*)" %))
+          (str/split-lines (slurp (str conf))))))
 
 (defn update!
   "Switch running containers to a new system in place, without restarting."

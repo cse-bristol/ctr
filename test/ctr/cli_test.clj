@@ -45,6 +45,26 @@
     (let [[_ opts] (main/parse ["web" "--network" "nat"] @#'main/newconfig-opts)]
       (is (= {:network "nat"} opts)))))
 
+(deftest parses-history-and-rollback
+  (let [[args opts] (main/parse ["web" "-n" "5"] @#'main/history-opts)]
+    (is (= ["web"] args))
+    (is (= {:limit 5} opts)))
+  (testing "the rollback index stays a positional argument, so `ctr rollback
+            web 3` reads the way it is documented"
+    (let [[args opts] (main/parse ["web" "3" "-r" "-s"] @#'main/rollback-opts)]
+      (is (= ["web" "3"] args))
+      (is (= {:restart-changed true :start true} opts))))
+  (testing "and the index is optional"
+    (is (= ["web"] (first (main/parse ["web"] @#'main/rollback-opts)))))
+  (testing "--no-activate is a flag, not a negated --activate"
+    (is (:no-activate (second (main/parse ["web" "--no-activate"]
+                                          @#'main/rollback-opts))))))
+
+(deftest keep-bounds-the-history-on-create
+  (is (= 5 (:keep (second (main/parse ["-s" "--keep" "5"] @#'main/create-opts)))))
+  (testing "absent, so container.clj applies its own default"
+    (is (nil? (:keep (second (main/parse ["-s"] @#'main/create-opts)))))))
+
 (deftest destroy-accepts-all
   (let [[args opts] (main/parse ["-a"] @#'main/destroy-opts)]
     (is (= [] args))

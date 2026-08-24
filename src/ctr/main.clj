@@ -5,6 +5,7 @@
             [babashka.process :as p]
             [clojure.string :as str]
             [ctr.container :as c]
+            [ctr.history :as h]
             [ctr.newconfig :as nc]
             [ctr.nix :as nix]
             [ctr.systemd :as sd]
@@ -16,7 +17,7 @@
 ctr create [<config>] [--start|-s] [--update-changed|-u] [--restart-changed|-r]
            [--attr|-A <path>] [--expr|-E <expr>] [--flake <ref>]
            [--nixpkgs-path|--nixos-path <expr>] [--full-eval]
-           [--legacy-install-dirs|--no-legacy-install-dirs]
+           [--legacy-install-dirs|--no-legacy-install-dirs] [--keep <n>]
            [--build-args <arg>...]
 
     <config> is one of:
@@ -45,6 +46,8 @@ ctr create [<config>] [--start|-s] [--update-changed|-u] [--restart-changed|-r]
                             Build for /etc/containers (NixOS < 22.05) or
                             /etc/nixos-containers. Defaults to whatever this
                             host's nixos-container uses.
+    --keep <n>              How many past deployments of each container to keep
+                            for 'ctr rollback'. Default 20.
     --build-args <arg>...   All following args are passed to 'nix build'.
 
 ctr build [<config>] [<create options>]
@@ -65,6 +68,28 @@ ctr new-config <name> [--address-prefix <a.b.c>] [--network <nat|iface>]
                        interface (the default).
     --network <iface>  Bridge the container onto interface <iface>. A free
                        address is picked on that interface's own network.
+
+ctr history <name> [--limit|-n <count>]
+    List the container's past deployments, newest first. The leading number is
+    the one 'ctr rollback' takes: 1 is what is deployed now, 2 the deployment
+    before it. Each one is kept alive as a nix garbage collector root.
+
+    --limit | -n <count>  How many to show. Default 10; 0 shows all.
+
+ctr rollback <name> [<n>] [--start|-s] [--restart-changed|-r] [--no-activate]
+    Put a container back to its nth-last deployment, as numbered by
+    'ctr history'. Defaults to 2, the deployment before the current one.
+
+    The restored configuration is recorded as a new deployment, so it appears
+    as 1 afterwards and 'ctr rollback <name>' undoes the rollback itself.
+
+    A running container is switched in place with switch-to-configuration when
+    only its system changed, and restarted when its container config changed.
+
+    --start | -s            Start the container afterwards if it is not running.
+    --restart-changed | -r  Restart rather than switching in place.
+    --no-activate           Relink only; leave the running container alone.
+    --keep <n>              As for 'ctr create'.
 
 ctr shell <name> [--start] [--timeout <seconds>]
     Open a root shell inside a running container.
@@ -98,7 +123,17 @@ ctr destroy --all|-a
   (merge build-opts
          {:start           {:alias :s :coerce :boolean}
           :update-changed  {:alias :u :coerce :boolean}
-          :restart-changed {:alias :r :coerce :boolean}}))
+          :restart-changed {:alias :r :coerce :boolean}
+          :keep            {:coerce :long}}))
+
+(def ^:private history-opts
+  {:limit {:alias :n :coerce :long}})
+
+(def ^:private rollback-opts
+  {:start           {:alias :s :coerce :boolean}
+   :restart-changed {:alias :r :coerce :boolean}
+   :no-activate     {:coerce :boolean}
+   :keep            {:coerce :long}})
 
 (def ^:private destroy-opts
   (merge build-opts {:all {:alias :a :coerce :boolean}}))
@@ -130,7 +165,7 @@ ctr destroy --all|-a
 
 (defn- install-all!
   "Link every container from a built etc output into the host."
-  [etc]
+  [etc {:keys [keep]}]
   (let [containers (c/with-state (c/scan etc))]
     (println)
     (println "Installing containers:")
@@ -138,7 +173,7 @@ ctr destroy --all|-a
       (if (= :unchanged state)
         (println (str name " (unchanged, skipped)"))
         (do (println name)
-            (c/install! ctr))))
+            (if keep (c/install! ctr :keep keep) (c/install! ctr)))))
     (when-let [changed (seq (remove #(= :unchanged (:state %)) containers))]
       (sd/daemon-reload!)
       (c/check-installed! (:name (first changed))))
@@ -149,7 +184,7 @@ ctr destroy --all|-a
   (println (nix/resolve-etc (first args) opts)))
 
 (defn cmd-create [args opts]
-  (let [containers (install-all! (nix/resolve-etc (first args) opts))]
+  (let [containers (install-all! (nix/resolve-etc (first args) opts) opts)]
     (sd/activate! containers {:start   (:start opts)
                               :update  (:update-changed opts)
                               :restart (:restart-changed opts)})))
@@ -215,6 +250,71 @@ ctr destroy --all|-a
   (when-not (fs/exists? (fs/path (c/conf-dir) (str nm ".conf")))
     (u/die (str "No container named '" nm "' in " (c/conf-dir) "."))))
 
+(defn- one-name
+  "Take the single container name a command was given."
+  [cmd args]
+  (when (not= 1 (count args))
+    (u/die (str "Usage: ctr " cmd " <container>")))
+  (doto (first args) check-exists!))
+
+(defn cmd-history [args opts]
+  ;; Deliberately not seeding the current deployment here: writing a gcroot
+  ;; would make listing need root, and every deploy from now on records itself.
+  (let [nm (one-name "history" args)
+        gens (h/generations (h/dir nm))]
+    (when (empty? gens)
+      (u/die (str "No deployment history for '" nm "' yet."
+                  " It is recorded from the next `ctr create` on.")))
+    (doseq [line (u/format-table (h/rows gens (:limit opts 10)))]
+      (println line))))
+
+(defn cmd-rollback [args opts]
+  (when (> (count args) 2)
+    (u/die "Usage: ctr rollback <container> [<n>]"))
+  (let [nm (one-name "rollback" (take 1 args))
+        idx (if-let [a (second args)]
+              (or (parse-long a) (u/die (str "Not a history index: " a)))
+              ;; The previous deployment: what "roll back" means unqualified.
+              2)
+        _ (when (< idx 2)
+            (u/die (if (= 1 idx)
+                     "Deployment 1 is the current one; there is nothing to undo."
+                     (str "History indices count back from 1; " idx " is not one."))))
+        ;; Before reading the history, so a container deployed by an older ctr
+        ;; -- or changed behind ctr's back -- is itself recoverable afterwards.
+        _ (c/seed! nm)
+        gens (h/generations (h/dir nm))
+        {:keys [gen service conf]}
+        (or (h/nth-last gens idx)
+            (u/die (str "No deployment " idx " back for '" nm "': "
+                        (if (empty? gens)
+                          "it has no history."
+                          (str "only " (count gens)
+                               (if (= 1 (count gens)) " is" " are")
+                               " kept. See `ctr history " nm "`.")))))]
+    (println (str "Rolling " nm " back to deployment " idx " (generation " gen ")"))
+    (when-let [sp (sd/system-path conf)] (println (str "  " sp)))
+    (println)
+    (let [ctr (merge {:name nm :service-src service :conf-src conf
+                      :auto-start? (:auto-start? (c/read-conf conf))}
+                     (c/dests nm))
+          ;; classify sees the same :system-only / :changed distinction a fresh
+          ;; deploy would, so activation below needs no special casing.
+          ctr (first (c/with-state [ctr]))]
+      (if (= :unchanged (:state ctr))
+        (println "Already deployed; nothing to do.")
+        (do (if (:keep opts)
+              (c/install! ctr :keep (:keep opts))
+              (c/install! ctr))
+            (sd/daemon-reload!)
+            (c/check-installed! nm)))
+      (sd/activate! [ctr] {:start   (:start opts)
+                           ;; A rollback that does not take effect is no
+                           ;; rollback, so this implies --update-changed.
+                           :update  (not (:no-activate opts))
+                           :restart (and (:restart-changed opts)
+                                         (not (:no-activate opts)))}))))
+
 (defn cmd-shell [argv]
   (let [[nm opts cmd] (parse-attach argv)]
     (when (seq cmd)
@@ -234,6 +334,8 @@ ctr destroy --all|-a
    "create"     [cmd-create     create-opts]
    "add"        [cmd-create     create-opts]
    "list"       [cmd-list       {}]
+   "history"    [cmd-history    history-opts]
+   "rollback"   [cmd-rollback   rollback-opts]
    "new-config" [cmd-new-config newconfig-opts]
    "restart"    [cmd-restart    {}]
    "destroy"    [cmd-destroy    destroy-opts]})
@@ -245,9 +347,9 @@ ctr destroy --all|-a
 
 (def ^:private needs-root
   "Commands that mutate host state or need privileged access to a container.
-   build, list and new-config are read-only, so they run as the calling user --
-   extra-container re-execs for everything."
-  #{"create" "add" "shell" "run" "destroy" "restart"})
+   build, list, history and new-config are read-only, so they run as the calling
+   user -- extra-container re-execs for everything."
+  #{"create" "add" "shell" "run" "destroy" "restart" "rollback"})
 
 (defn- reexec-as-root!
   "Re-run ourselves under sudo, preserving the variables the run depends on."

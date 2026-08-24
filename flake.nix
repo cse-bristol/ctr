@@ -194,6 +194,19 @@
                   assert "v2" in machine.succeed("nixos-container run t -- cat /etc/testFile")
                   assert started_at() == before, "container should not have restarted"
 
+              with subtest("rollback switches back in place when only the system changed"):
+                  # v1 and v2 differ only in SYSTEM_PATH, which is the case
+                  # rollback should handle without stopping the container.
+                  before = started_at()
+                  out = machine.succeed("ctr rollback t 2")
+                  assert "Updating containers" in out, out
+                  assert "v1" in machine.succeed("nixos-container run t -- cat /etc/testFile")
+                  assert started_at() == before, "container should not have restarted"
+
+              with subtest("a rollback is itself a deployment, so rolling back again redoes it"):
+                  machine.succeed("ctr rollback t 2")
+                  assert "v2" in machine.succeed("nixos-container run t -- cat /etc/testFile")
+
               with subtest("a container config change restarts the container"):
                   before = started_at()
                   out = machine.succeed(
@@ -259,11 +272,69 @@
                   machine.succeed("ctr run --start web -- true")
                   assert "up" in machine.succeed("ctr list")
 
+              with subtest("history lists every deployment, newest first"):
+                  # v1, v2, back to v1, back to v2, then privateNetwork.
+                  rows = [l.split() for l in machine.succeed("ctr history t").splitlines()]
+                  assert rows[0][:2] == ["#", "GEN"], rows
+                  assert [r[0] for r in rows[1:]] == ["1", "2", "3", "4", "5"], rows
+                  assert rows[1][-1] == "(current)", rows
+                  # Every deployment pins its own system, so none were collected.
+                  # DEPLOYED holds a space, so pick the column out by shape.
+                  for r in rows[1:]:
+                      system = [f for f in r if f.startswith("/nix/store/")]
+                      assert len(system) == 1, r
+                      machine.succeed(f"test -e {system[0]}")
+
+              with subtest("history is retained as gc roots"):
+                  roots = machine.succeed("nix-store --gc --print-roots")
+                  assert "/nix/var/nix/gcroots/ctr-history/t/" in roots, roots
+
+              with subtest("--limit shows only the most recent deployments"):
+                  out = machine.succeed("ctr history t -n 2")
+                  assert [l.split()[0] for l in out.splitlines()[1:]] == ["1", "2"], out
+
+              with subtest("rollback undoes a container config change by restarting"):
+                  before = started_at()
+                  out = machine.succeed("ctr rollback t 2")
+                  assert "Restarting containers" in out, out
+                  assert started_at() != before, "container should have restarted"
+                  row = [l for l in machine.succeed("ctr list").splitlines()
+                         if l.startswith("t ")][0]
+                  assert row.split() == ["t", "up", "host", "no"], row
+                  # ...and back, to leave t as the later subtests expect it.
+                  machine.succeed("ctr rollback t 2")
+                  row = [l for l in machine.succeed("ctr list").splitlines()
+                         if l.startswith("t ")][0]
+                  assert row.split() == ["t", "up", "10.251.0.2", "no"], row
+
+              with subtest("rollback rejects an index it cannot honour"):
+                  out = machine.fail("ctr rollback t 99 2>&1")
+                  assert "No deployment 99 back" in out, out
+                  assert "ctr history t" in out, out
+                  out = machine.fail("ctr rollback t 1 2>&1")
+                  assert "nothing to undo" in out, out
+
+              with subtest("each container has its own history"):
+                  out = machine.succeed("ctr history web")
+                  assert [l.split()[0] for l in out.splitlines()[1:]] == ["1"], out
+                  out = machine.fail("ctr history nosuch 2>&1")
+                  assert "No container named 'nosuch'" in out, out
+
+              with subtest("--keep bounds how many deployments are retained"):
+                  machine.succeed(f"ctr create --start --keep 2 -E '{cfg('v1')}'")
+                  out = machine.succeed("ctr history t")
+                  assert [l.split()[0] for l in out.splitlines()[1:]] == ["1", "2"], out
+                  # The dropped generations released their roots, so their
+                  # systems are collectable again.
+                  roots = machine.succeed("nix-store --gc --print-roots")
+                  assert "ctr-history/t/00001-" not in roots, roots
+
               with subtest("destroy removes the container and its traces"):
                   machine.succeed("ctr destroy t web")
                   machine.fail("nixos-container status t")
                   machine.fail("test -e /etc/systemd-mutable/system/container@t.service")
                   machine.fail("test -e /nix/var/nix/gcroots/auto/ctr-t")
+                  machine.fail("test -e /nix/var/nix/gcroots/ctr-history/t")
                   assert machine.succeed("ctr list").strip() == ""
             '';
           };

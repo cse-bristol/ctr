@@ -2,7 +2,7 @@
  :tasks
  {:requires ([clojure.test :as t])
   test {:doc "Run the unit tests"
-        :task (let [nss '[ctr.container-test ctr.systemd-test ctr.nix-test ctr.cli-test ctr.util-test ctr.newconfig-test]
+        :task (let [nss '[ctr.container-test ctr.systemd-test ctr.nix-test ctr.cli-test ctr.util-test ctr.newconfig-test ctr.history-test]
                     _ (apply require nss)
                     {:keys [fail error]} (apply t/run-tests nss)]
                 (System/exit (if (pos? (+ fail error)) 1 0)))}}}

@@ -3,6 +3,7 @@
    destroying it on the host."
   (:require [babashka.fs :as fs]
             [clojure.string :as str]
+            [ctr.history :as h]
             [ctr.systemd :as sd]
             [ctr.util :as u]))
 
@@ -64,6 +65,12 @@
 (defn- wants-dir [] (str (fs/path service-dir "machines.target.wants")))
 (defn gcroot [nm] (str (fs/path gcroots-dir (str "ctr-" nm))))
 
+(defn dests
+  "Where a container's unit and conf live on this host, once installed."
+  [nm]
+  {:service-dest (str (fs/path service-dir (sd/unit nm)))
+   :conf-dest    (str (fs/path (conf-dir) (str nm ".conf")))})
+
 (defn- name-from-service [path]
   (second (re-matches #"container@(.+)\.service" (fs/file-name path))))
 
@@ -102,12 +109,11 @@
      (for [svc svcs
            :let [nm   (name-from-service svc)
                  conf (str (fs/path root (conf-name) (str nm ".conf")))]]
-       {:name         nm
-        :service-src  svc
-        :conf-src     conf
-        :service-dest (str (fs/path service-dir (sd/unit nm)))
-        :conf-dest    (str (fs/path (conf-dir) (str nm ".conf")))
-        :auto-start?  (:auto-start? (read-conf conf))}))))
+       (merge {:name        nm
+               :service-src svc
+               :conf-src    conf
+               :auto-start? (:auto-start? (read-conf conf))}
+              (dests nm))))))
 
 (defn- realpath [p]
   (when (fs/exists? p) (str (fs/real-path p))))
@@ -168,10 +174,23 @@
                  :else                  "-")
            (if auto-start? "yes" "no")])))
 
+(defn seed!
+  "Record whatever is installed for `nm` right now as a generation.
+
+   Called before a deploy overwrites it, so the outgoing config stays rollback-
+   able -- including on hosts whose containers were installed before ctr kept
+   any history. `h/record!` ignores a pair it has already, so this is cheap and
+   idempotent."
+  [nm]
+  (let [{:keys [service-dest conf-dest]} (dests nm)]
+    (h/record! (h/dir nm) (realpath service-dest) (realpath conf-dest))))
+
 (defn install!
   "Link a container's unit and conf into the host, with gcroots so the store
-   paths survive garbage collection."
-  [{:keys [name service-src conf-src service-dest conf-dest auto-start?]}]
+   paths survive garbage collection, and record the deploy in the container's
+   history so `ctr rollback` can undo it."
+  [{:keys [name service-src conf-src service-dest conf-dest auto-start?]}
+   & {:keys [keep] :or {keep h/default-keep}}]
   (when-not (fs/exists? conf-src)
     ;; A config built for the other convention lands in the other directory, so
     ;; say that rather than just reporting a missing file (extra-container:754).
@@ -185,11 +204,14 @@
                     "Rebuild with `--" (if (legacy-install-dirs?) "" "no-")
                     "legacy-install-dirs`.\n"))
         (u/die (str "Error: " conf-src " doesn't exist")))))
+  (seed! name)
   (run! fs/create-dirs [service-dir (conf-dir) gcroots-dir])
   (link! (realpath service-src) service-dest)
   (link! (realpath conf-src) conf-dest)
   (link! service-dest (gcroot name))
   (link! conf-dest (str (gcroot name) ".conf"))
+  (h/record! (h/dir name) (realpath service-dest) (realpath conf-dest))
+  (h/prune! (h/dir name) keep)
   (let [want (fs/path (wants-dir) (sd/unit name))]
     (if auto-start?
       (do (fs/create-dirs (wants-dir))
@@ -234,6 +256,9 @@
           (reset! reload? true))
         (fs/delete-if-exists (gcroot nm))
         (fs/delete-if-exists (str (gcroot nm) ".conf"))
+        ;; The history's gcroots would otherwise pin every system this
+        ;; container ever ran, with nothing left to roll back.
+        (h/forget! (h/dir nm))
         ;; Remove the declarative conf, else nixos-container refuses with
         ;; 'cannot destroy declarative container'; then leave an empty one, else
         ;; it stops before destroying the container completely.

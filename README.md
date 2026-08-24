@@ -69,9 +69,11 @@ what is missing rather than failing obscurely.
 ctr create     [<config>] [--start|-s] [--update-changed|-u] [--restart-changed|-r]
                [--attr|-A <path>] [--expr|-E <expr>] [--flake <ref>]
                [--nixpkgs-path|--nixos-path <expr>] [--full-eval]
-               [--[no-]legacy-install-dirs] [--build-args <arg>...]
+               [--[no-]legacy-install-dirs] [--keep <n>] [--build-args <arg>...]
 ctr build      [<config>] [<create options>]
 ctr list
+ctr history    <name> [--limit|-n <count>]
+ctr rollback   <name> [<n>] [--start|-s] [--restart-changed|-r] [--no-activate]
 ctr new-config <name> [--address-prefix <a.b.c>] [--network <nat|iface>] [--no-network] [--auto-start]
                [--state-version <ver>]
 ctr shell      <name> [--start] [--timeout <seconds>]
@@ -86,9 +88,9 @@ Run `ctr help` for the full option descriptions.
 reference, a store path from `ctr build`, or `-` (or omitted) to read from
 stdin.
 
-`create`, `shell`, `run`, `destroy` and `restart` re-run themselves under `sudo`
-when needed. `build`, `list` and `new-config` do not touch host state and run as
-you.
+`create`, `shell`, `run`, `destroy`, `restart` and `rollback` re-run themselves
+under `sudo` when needed. `build`, `list`, `history` and `new-config` do not
+touch host state and run as you.
 
 ## Starting a container
 
@@ -192,6 +194,41 @@ Both need the container to be running; `--start` starts it first and waits.
 Everything after the container name — or after `--`, if the command's own flags
 would otherwise be ambiguous — is passed through untouched.
 
+## Rolling back a deployment
+
+Everything `ctr` installs for a container is two store paths — the systemd unit
+and the container conf — so every deployment is recorded as that pair, under
+`/nix/var/nix/gcroots/ctr-history/<name>/`. Being gcroots, they also keep the
+old systems from being garbage collected, which is what makes going back
+possible at all.
+
+```bash
+$ ctr history web
+#  GEN  DEPLOYED          SYSTEM
+1  9    2026-08-24 14:02  /nix/store/1i0…-nixos-system-web-25.11  (current)
+2  8    2026-08-22 09:15  /nix/store/rn4…-nixos-system-web-25.11
+3  6    2026-08-19 17:40  /nix/store/w8k…-nixos-system-web-25.11
+
+$ sudo ctr rollback web        # the deployment before this one, i.e. 2
+$ sudo ctr rollback web 3      # the third-last
+```
+
+The leading number counts back from the current deployment; `GEN` is the stable
+generation number, which is never reused. A rollback is recorded as a new
+deployment rather than moving a pointer backwards, so `1` always means what is
+deployed now, and `ctr rollback web` undoes a rollback as readily as it undoes a
+deploy.
+
+A running container is put back the same way `ctr create` would move it forward:
+switched in place with `switch-to-configuration` when only its system changed,
+restarted when its container config changed. `--no-activate` relinks without
+touching the running container, and `-s` starts a stopped one.
+
+`--keep <n>` bounds how many deployments are retained per container, on both
+`create` and `rollback`; the default is 20. Dropping one releases its gcroot, so
+its system becomes collectable again. `ctr destroy` forgets a container's
+history entirely.
+
 ## Private network helper
 
 The `extra.*` options cover the fiddly parts of private-network containers.
@@ -246,12 +283,15 @@ configure — but `ctr build` can target the other convention with
   `nixos-container root-login` and `nixos-container run`.
 - **`list` shows status and address**, not just names.
 - **`new-config`** has no equivalent.
+- **`history` and `rollback`** have no equivalent. extra-container overwrites the
+  installed unit and conf in place and repoints their single gcroot, so the
+  system you were running becomes garbage the moment you deploy over it.
 - **`--full-eval`.** `ctr` evaluates containers with a reduced module set, like
   extra-container. That set needs a stub for every option nixpkgs' modules grow
   a reference to, and it does break: adapting it to NixOS 26.05 needed five new
   stubs. `--full-eval` evaluates a complete NixOS system instead, which is
   immune to that churn and measured ~2s slower per build.
-- **`build`, `list` and `new-config` don't need root.**
+- **`build`, `list`, `history` and `new-config` don't need root.**
 - **`-A a.b` selects a nested attribute**, as `nix-build -A` does.
   extra-container looks for one attribute literally named `a.b`.
 - **A container that drops `autoStart` stops starting at boot.**
