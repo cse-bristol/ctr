@@ -37,7 +37,7 @@
 
 (defn generations
   "Recorded generations of `d`, oldest first, as
-   {:gen :service :conf :system :at}.
+   {:gen :service :conf :system :version :at}.
 
    Entries missing a link, or whose store paths have been collected, are
    skipped: they cannot be rolled back to, so they are not offered."
@@ -48,11 +48,14 @@
                cnf (link-path d n "conf")]
          ;; fs/exists? follows the link, so a collected store path reads as
          ;; absent -- which is exactly the question being asked.
-         :when (and (fs/exists? svc) (fs/exists? cnf))]
+         :when (and (fs/exists? svc) (fs/exists? cnf))
+         :let [system (sd/system-path cnf)]]
      {:gen     n
       :service (str (fs/real-path svc))
       :conf    (str (fs/real-path cnf))
-      :system  (sd/system-path cnf)
+      :system  system
+      ;; Read here, with the rest of the I/O, so `rows` stays pure.
+      :version (sd/nixos-version system)
       :at      (fs/last-modified-time svc {:nofollow-links true})})))
 
 (defn record!
@@ -112,10 +115,10 @@
   (let [newest-first (reverse gens)
         shown (if (and limit (pos? limit)) (take limit newest-first) newest-first)]
     (when (seq shown)
-      (into [["#" "GEN" "DEPLOYED" "SYSTEM"]]
+      (into [["#" "GEN" "DEPLOYED" "VERSION" "SYSTEM"]]
             (map-indexed
-             (fn [i {:keys [gen at system]}]
-               [(str (inc i)) (str gen) (format-time at)
+             (fn [i {:keys [gen at system version]}]
+               [(str (inc i)) (str gen) (format-time at) (sd/version-label version)
                 ;; format-table does not pad the last column, so the marker can
                 ;; simply be appended.
                 (str (or system "-") (when (zero? i) "  (current)"))])

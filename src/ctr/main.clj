@@ -195,7 +195,8 @@ ctr destroy --all|-a
                 (let [names (c/installed-names)]
                   (when (seq names)
                     (c/list-rows names sd/active?
-                                 #(c/read-conf (str (c/conf-dir) "/" % ".conf"))))))]
+                                 #(c/read-conf (str (c/conf-dir) "/" % ".conf"))
+                                 sd/nixos-version))))]
     (println line)))
 
 (defn cmd-new-config [args opts]
@@ -293,7 +294,10 @@ ctr destroy --all|-a
                                (if (= 1 (count gens)) " is" " are")
                                " kept. See `ctr history " nm "`.")))))]
     (println (str "Rolling " nm " back to deployment " idx " (generation " gen ")"))
-    (when-let [sp (sd/system-path conf)] (println (str "  " sp)))
+    (when-let [sp (sd/system-path conf)]
+      (println (str "  " sp
+                    (when-let [v (sd/nixos-version sp)]
+                      (str " (" (sd/version-label v) ")")))))
     (println)
     (let [ctr (merge {:name nm :service-src service :conf-src conf
                       :auto-start? (:auto-start? (c/read-conf conf))}

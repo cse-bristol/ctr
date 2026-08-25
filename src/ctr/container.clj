@@ -92,6 +92,7 @@
      ;; `nixos-container create` writes an explicit 0. Only 1 means private.
      :private-network? (= "1" (vals "PRIVATE_NETWORK"))
      :host-bridge      (some-> (vals "HOST_BRIDGE") not-empty)
+     :system-path      (some-> (vals "SYSTEM_PATH") not-empty)
      :host-address     (addr "HOST_ADDRESS")
      :local-address    (addr "LOCAL_ADDRESS")}))
 
@@ -160,19 +161,24 @@
     []))
 
 (defn list-rows
-  "Table rows describing the installed containers. `running?` and `conf` are
-   injected so this stays pure and testable."
-  [names running? conf]
-  (into [["NAME" "STATUS" "ADDRESS" "AUTOSTART"]]
+  "Table rows describing the installed containers. `running?`, `conf` and
+   `version` -- the last a fn from a system store path to its NixOS label --
+   are injected so this stays pure and testable."
+  [names running? conf version]
+  (into [["NAME" "STATUS" "ADDRESS" "AUTOSTART" "VERSION"]]
         (for [nm names
-              :let [{:keys [private-network? local-address auto-start?]} (conf nm)]]
+              :let [{:keys [private-network? local-address auto-start? system-path]}
+                    (conf nm)]]
           [nm
            (if (running? nm) "up" "down")
            (cond (not private-network?) "host"
                  local-address          local-address
                  ;; Bridged or DHCP: the conf carries no address at all.
                  :else                  "-")
-           (if auto-start? "yes" "no")])))
+           (if auto-start? "yes" "no")
+           ;; Last, so format-table leaves the widest and most variable column
+           ;; unpadded and the familiar ones stay where they were.
+           (sd/version-label (version system-path))])))
 
 (defn seed!
   "Record whatever is installed for `nm` right now as a generation.

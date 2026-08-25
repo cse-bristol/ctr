@@ -166,6 +166,7 @@
     (testing "a private container with a static address"
       (is (= {:auto-start? true :private-network? true
               :host-bridge nil
+              :system-path "/nix/store/aaaa-nixos-system"
               :host-address "10.233.1.1" :local-address "10.233.1.2"}
              (at (sup/conf :auto-start true :private-network true
                            :host-address "10.233.1.1"
@@ -173,16 +174,19 @@
     (testing "a host-network container"
       (is (= {:auto-start? false :private-network? false
               :host-bridge nil
+              :system-path "/nix/store/aaaa-nixos-system"
               :host-address nil :local-address nil}
              (at (sup/conf)))))
     (testing "private but with no address: bridged or DHCP"
       (is (= {:auto-start? false :private-network? true
               :host-bridge nil
+              :system-path "/nix/store/aaaa-nixos-system"
               :host-address nil :local-address nil}
              (at (sup/conf :private-network true)))))
     (testing "a container bridged onto an interface"
       (is (= {:auto-start? false :private-network? true
               :host-bridge "br0"
+              :system-path nil
               :host-address nil :local-address "192.168.1.50"}
              (at "PRIVATE_NETWORK=1\nHOST_BRIDGE=br0\nLOCAL_ADDRESS=192.168.1.50/24\n"))))
     (testing "PRIVATE_NETWORK absent means host network, as the module emits"
@@ -192,24 +196,30 @@
     (testing "a conf that isn't there yields all-nil rather than throwing"
       (is (= {:auto-start? false :private-network? false
               :host-bridge nil
+              :system-path nil
               :host-address nil :local-address nil}
              (c/read-conf (str (fs/path dir "absent.conf"))))))
     (fs/delete-tree dir)))
 
-(deftest list-rows-renders-status-address-and-autostart
-  (let [confs {"db"   {:private-network? true :local-address "10.233.2.2"}
-               "prox" {:private-network? false}
-               "brg"  {:private-network? true :auto-start? true}}]
-    (is (= [["NAME" "STATUS" "ADDRESS" "AUTOSTART"]
-            ["db"   "up"     "10.233.2.2" "no"]
-            ["prox" "down"   "host"       "no"]
-            ["brg"  "up"     "-"          "yes"]]
-           (c/list-rows ["db" "prox" "brg"] #{"db" "brg"} confs)))))
+(deftest list-rows-renders-status-address-autostart-and-version
+  (let [confs {"db"   {:private-network? true :local-address "10.233.2.2"
+                       :system-path "/nix/store/a-system"}
+               "prox" {:private-network? false :system-path "/nix/store/b-system"}
+               ;; No SYSTEM_PATH at all, so there is nothing to look a label up
+               ;; with -- which must read as unknown rather than throw.
+               "brg"  {:private-network? true :auto-start? true}}
+        version {"/nix/store/a-system" "26.05.20260812.9f78f44"
+                 "/nix/store/b-system" "25.11pre-git"}]
+    (is (= [["NAME" "STATUS" "ADDRESS" "AUTOSTART" "VERSION"]
+            ["db"   "up"     "10.233.2.2" "no"      "26.05@9f78f44"]
+            ["prox" "down"   "host"       "no"      "25.11pre-git"]
+            ["brg"  "up"     "-"          "yes"     "-"]]
+           (c/list-rows ["db" "prox" "brg"] #{"db" "brg"} confs version)))))
 
 (deftest read-conf-handles-ipv6-and-prefix-lengths
   (let [dir (sup/tmpdir)
         at  (fn [content] (let [p (fs/path dir "c.conf")] (spit (str p) content)
-                            (c/read-conf (str p))))]
+                               (c/read-conf (str p))))]
     (testing "an empty v4 line falls through to the v6 one"
       ;; "" is truthy in Clojure, so this has to be an explicit emptiness check.
       (is (= "fd00::2" (:local-address (at "PRIVATE_NETWORK=1\nLOCAL_ADDRESS=\nLOCAL_ADDRESS6=fd00::2\n")))))

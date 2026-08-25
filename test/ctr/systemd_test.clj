@@ -1,5 +1,7 @@
 (ns ctr.systemd-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [babashka.fs :as fs]
+            [clojure.test :refer [deftest is testing]]
+            [ctr.support :as sup]
             [ctr.systemd :as sd]))
 
 (defn- cs [& pairs]
@@ -49,3 +51,36 @@
   (let [p (sd/plan (cs "z" :changed "a" :changed "m" :system-only) #{"z" "a" "m"} {:start true})]
     (is (= ["m"] (:update p)))
     (is (= ["a" "z"] (:restart p)) "sorted, so output and `comm` semantics are stable")))
+
+;; The nixpkgs commit a container was built from is only ever as good as the
+;; label the system closure carries, so the interesting cases are the ones
+;; where there is no commit in it to show.
+(deftest version-label-shortens-a-flake-label-to-release-and-rev
+  (is (= "26.05@9f78f44" (sd/version-label "26.05.20260812.9f78f44")))
+  (testing "including a nixpkgs tree that was dirty when it was built"
+    (is (= "26.05@dirty" (sd/version-label "26.05.20260812.dirty"))))
+  (testing "a label with no commit in it is shown as it is"
+    (is (= "25.11pre-git" (sd/version-label "25.11pre-git")))
+    (is (= "25.11" (sd/version-label "25.11"))))
+  (testing "as is one the user chose themselves"
+    (is (= "my-label" (sd/version-label "my-label"))))
+  (testing "and an unreadable system reads as absent, not as an error"
+    (is (= "-" (sd/version-label nil)))
+    (is (= "-" (sd/version-label "")))
+    (is (= "-" (sd/version-label "   ")))))
+
+(deftest nixos-version-reads-the-label-out-of-a-system-closure
+  (let [dir (sup/tmpdir)
+        system (str (fs/path dir "abcd-nixos-system-web-26.05"))]
+    (fs/create-dirs system)
+    (spit (str (fs/path system "nixos-version")) "26.05.20260812.9f78f44\n")
+    (is (= "26.05.20260812.9f78f44" (sd/nixos-version system)))
+    (testing "a collected or absent system yields nil rather than throwing"
+      (is (nil? (sd/nixos-version (str (fs/path dir "gone")))))
+      (is (nil? (sd/nixos-version nil)))
+      (is (nil? (sd/nixos-version ""))))
+    (testing "as does a system with no label file, as a hand-built one may be"
+      (let [bare (str (fs/path dir "bare"))]
+        (fs/create-dirs bare)
+        (is (nil? (sd/nixos-version bare)))))
+    (fs/delete-tree dir)))

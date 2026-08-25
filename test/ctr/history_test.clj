@@ -126,9 +126,9 @@
 ;; nth-last and rows are what the `ctr rollback <name> 3` UI is made of, so they
 ;; are tested against plain maps rather than the filesystem.
 (def ^:private fake-gens
-  [{:gen 4 :system "/nix/store/a-system"}
-   {:gen 5 :system "/nix/store/b-system"}
-   {:gen 7 :system "/nix/store/c-system"}])
+  [{:gen 4 :system "/nix/store/a-system" :version "25.11pre-git"}
+   {:gen 5 :system "/nix/store/b-system" :version nil}
+   {:gen 7 :system "/nix/store/c-system" :version "26.05.20260812.9f78f44"}])
 
 (deftest nth-last-counts-back-from-the-current-deployment
   (is (= 7 (:gen (h/nth-last fake-gens 1))) "1 is what is deployed now")
@@ -142,11 +142,13 @@
 
 (deftest rows-number-the-newest-first
   (let [[header & body] (h/rows fake-gens nil)]
-    (is (= ["#" "GEN" "DEPLOYED" "SYSTEM"] header))
+    (is (= ["#" "GEN" "DEPLOYED" "VERSION" "SYSTEM"] header))
     (is (= [["1" "7"] ["2" "5"] ["3" "4"]]
            (mapv #(subvec % 0 2) body))
         "the index a user types lines up with nth-last")
     (is (= "-" (nth (first body) 2)) "a generation with no timestamp")
+    (is (= ["26.05@9f78f44" "-" "25.11pre-git"] (mapv #(nth % 3) body))
+        "the label of each deployed system, or - where it could not be read")
     (is (= "/nix/store/c-system  (current)" (last (first body))))
     (is (= "/nix/store/b-system" (last (second body)))))
   (testing "limit shows only the newest few"

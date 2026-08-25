@@ -122,7 +122,10 @@
               # because its wrapper puts nixos-container on PATH.
               environment.systemPackages = [ pkgs.nixos-container ];
               virtualisation.memorySize = 2048;
-              virtualisation.diskSize = 4096;
+              virtualisation.diskSize = 8192;
+              # The reboot subtests need everything the test built to still be
+              # there afterwards, and the default writable store is a tmpfs.
+              virtualisation.writableStoreUseTmpfs = false;
               nix.nixPath = [ "nixpkgs=${nixpkgs}" ];
               nix.settings.experimental-features = [ "nix-command" "flakes" ];
               system.stateVersion = config.system.nixos.release;
@@ -158,13 +161,40 @@
                       };
                     };
                   }).config.system.build.etc;
+                  autoStarted = auto: (self.lib.evalContainers {
+                    inherit system;
+                    config.containers.a = {
+                      autoStart = auto;
+                      config.environment.etc.testFile.text = "v1";
+                    };
+                  }).config.system.build.etc;
                 in
-                [ (container "v1") (container "v2") restartable generated ];
+                [
+                  (container "v1")
+                  (container "v2")
+                  restartable
+                  generated
+                  (autoStarted true)
+                  (autoStarted false)
+                ];
             };
 
             testScript = ''
               def cfg(text):
                   return '{ containers.t.config.environment.etc.testFile.text = "%s"; }' % text
+
+              def autocfg(auto):
+                  return ('{ containers.a = { autoStart = %s;'
+                          ' config.environment.etc.testFile.text = "v1"; }; }' % auto)
+
+              def ctr_list():
+                  return {l.split()[0]: l.split()
+                          for l in machine.succeed("ctr list").splitlines()}
+
+              def reboot():
+                  machine.shutdown()
+                  machine.start()
+                  machine.wait_for_unit("multi-user.target")
 
               def started_at():
                   # /etc/machine-id persists in the container state directory, so
@@ -336,6 +366,29 @@
                   machine.fail("test -e /nix/var/nix/gcroots/auto/ctr-t")
                   machine.fail("test -e /nix/var/nix/gcroots/ctr-history/t")
                   assert machine.succeed("ctr list").strip() == ""
+
+              wants = "/etc/systemd-mutable/system/machines.target.wants"
+
+              with subtest("autoStart links the unit into machines.target.wants"):
+                  machine.succeed(f"ctr create --start -E '{autocfg('true')}'")
+                  machine.succeed(f"ctr create --start -E '{cfg('v1')}'")
+                  machine.succeed(f"test -L {wants}/container@a.service")
+                  machine.fail(f"test -e {wants}/container@t.service")
+                  assert ctr_list()["a"][-1] == "yes", ctr_list()
+                  assert ctr_list()["t"][-1] == "no", ctr_list()
+
+              with subtest("an autoStart container comes back after a reboot"):
+                  reboot()
+                  machine.wait_for_unit("container@a.service")
+                  # t is the control: without autoStart it must stay stopped.
+                  assert ctr_list()["a"][:2] == ["a", "up"], ctr_list()
+                  assert ctr_list()["t"][:2] == ["t", "down"], ctr_list()
+
+              with subtest("dropping autoStart stops it starting at boot"):
+                  machine.succeed(f"ctr create -E '{autocfg('false')}'")
+                  machine.fail(f"test -e {wants}/container@a.service")
+                  reboot()
+                  assert ctr_list()["a"][:2] == ["a", "down"], ctr_list()
             '';
           };
         };

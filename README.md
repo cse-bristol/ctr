@@ -176,14 +176,22 @@ sudo ctr create --start web.nix     # or: ctr new-config web | sudo ctr create -
 
 ```bash
 $ ctr list
-NAME  STATUS  ADDRESS     AUTOSTART
-db    up      10.233.2.2  no
-web   down    10.233.1.2  yes
+NAME  STATUS  ADDRESS     AUTOSTART  VERSION
+db    up      10.233.2.2  no         26.05@9f78f44
+web   down    10.233.1.2  yes        25.11pre-git
 ```
 
 `ADDRESS` is the address in the container's conf, so it reads `host` for a
 container sharing the host's network and `-` for a bridged or DHCP one, where
 there is no configured address to show.
+
+`VERSION` is the NixOS label of the deployed system, read out of the system
+closure itself. Built from a flake, that label carries the short nixpkgs commit
+— shown here as `26.05@9f78f44` — which is usually the thing you want to know.
+Built any other way it cannot: a plain nixpkgs checkout labels itself
+`25.11pre-git`, a dirty tree `26.05@dirty`, and a `system.nixos.label` you set
+yourself says whatever you chose. The label is shown as it is in those cases
+rather than guessed at, and `-` means the system had no label to read.
 
 ```bash
 sudo ctr shell web                  # a root shell inside the container
@@ -204,10 +212,10 @@ possible at all.
 
 ```bash
 $ ctr history web
-#  GEN  DEPLOYED          SYSTEM
-1  9    2026-08-24 14:02  /nix/store/1i0…-nixos-system-web-25.11  (current)
-2  8    2026-08-22 09:15  /nix/store/rn4…-nixos-system-web-25.11
-3  6    2026-08-19 17:40  /nix/store/w8k…-nixos-system-web-25.11
+#  GEN  DEPLOYED          VERSION        SYSTEM
+1  9    2026-08-24 14:02  26.05@9f78f44  /nix/store/1i0…-nixos-system-web-26.05  (current)
+2  8    2026-08-22 09:15  26.05@3ab12cd  /nix/store/rn4…-nixos-system-web-26.05
+3  6    2026-08-19 17:40  25.11pre-git   /nix/store/w8k…-nixos-system-web-25.11
 
 $ sudo ctr rollback web        # the deployment before this one, i.e. 2
 $ sudo ctr rollback web 3      # the third-last

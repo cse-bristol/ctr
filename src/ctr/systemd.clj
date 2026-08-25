@@ -108,6 +108,32 @@
     (some #(second (re-matches #"SYSTEM_PATH=(.*)" %))
           (str/split-lines (slurp (str conf))))))
 
+(defn nixos-version
+  "The NixOS version label of a system store path, read from the `nixos-version`
+   file every system closure carries. nil when there is no path, or when the
+   system has been garbage collected."
+  [system]
+  (when-not (str/blank? (str system))
+    (let [f (str (fs/path (str system) "nixos-version"))]
+      (when (fs/exists? f)
+        (not-empty (str/trim (slurp f)))))))
+
+(defn version-label
+  "Render a NixOS version label for a table cell.
+
+   A flake-built system labels itself `<release>.<date>.<shortrev>`, where the
+   rev is the nixpkgs commit -- the part worth seeing -- so that form is
+   shortened to `<release>@<rev>`. Anything else is shown verbatim rather than
+   guessed at: a plain checkout says `25.11pre-git`, a dirty tree
+   `26.05@dirty`, and a `system.nixos.label` the user set says whatever they
+   chose."
+  [label]
+  (if (str/blank? (str label))
+    "-"
+    (if-let [[_ release rev] (re-matches #"(\d+\.\d+)\.\d{8}\.(.+)" label)]
+      (str release "@" rev)
+      label)))
+
 (defn update!
   "Switch running containers to a new system in place, without restarting."
   [containers]
