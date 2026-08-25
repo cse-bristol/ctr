@@ -52,12 +52,20 @@
                   (Thread/sleep 1)
                   (recur (inc attempt)))))))
 
+(defn stop-containers!
+  "Stop container units and wait until their machines are really gone.
+
+   `systemctl stop` returns once the unit is inactive, but the machine can
+   outlive it (nixpkgs#43652), so `terminate!` is the part that settles it."
+  [names]
+  (u/check! "systemctl" "stop" (map unit names))
+  (terminate! names))
+
 (defn restart!
   "`systemctl restart container@x` is broken (nixpkgs#43652), so stop, make sure
    the machine is really gone, then start."
   [names]
-  (u/check! "systemctl" "stop" (map unit names))
-  (terminate! names)
+  (stop-containers! names)
   (u/check! "systemctl" "start" (map unit names)))
 
 (defn wait-for-machine!

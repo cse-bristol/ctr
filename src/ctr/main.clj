@@ -100,6 +100,12 @@ ctr run <name> [--start] [--timeout <seconds>] [--] <cmd> [<arg>...]
     --start           Start the container first if it is not running.
     --timeout <secs>  How long to wait for it to register. Default 90.
 
+ctr start <container>...
+    Start containers. Ones already running are left alone.
+
+ctr stop <container>...
+    Stop containers, waiting until each machine is really gone.
+
 ctr restart <container>...
     Restart containers, working around nixpkgs issue #43652.
 
@@ -251,6 +257,28 @@ ctr destroy --all|-a
   (when-not (fs/exists? (fs/path (c/conf-dir) (str nm ".conf")))
     (u/die (str "No container named '" nm "' in " (c/conf-dir) "."))))
 
+(defn- check-names!
+  "Validate the names a start/stop-style command was given."
+  [args]
+  (when (empty? args) (u/die "No container name specified"))
+  (run! check-exists! args))
+
+(defn cmd-start [args _]
+  (check-names! args)
+  (let [{running true stopped false} (group-by (comp boolean sd/active?) args)]
+    (doseq [nm running] (println (str nm " is already running")))
+    (when (seq stopped)
+      (u/print-list "Starting containers:" stopped)
+      (sd/start! stopped))))
+
+(defn cmd-stop [args _]
+  (check-names! args)
+  (let [{running true stopped false} (group-by (comp boolean sd/active?) args)]
+    (doseq [nm stopped] (println (str nm " is not running")))
+    (when (seq running)
+      (u/print-list "Stopping containers:" running)
+      (sd/stop-containers! running))))
+
 (defn- one-name
   "Take the single container name a command was given."
   [cmd args]
@@ -341,6 +369,8 @@ ctr destroy --all|-a
    "history"    [cmd-history    history-opts]
    "rollback"   [cmd-rollback   rollback-opts]
    "new-config" [cmd-new-config newconfig-opts]
+   "start"      [cmd-start      {}]
+   "stop"       [cmd-stop       {}]
    "restart"    [cmd-restart    {}]
    "destroy"    [cmd-destroy    destroy-opts]})
 
@@ -353,7 +383,7 @@ ctr destroy --all|-a
   "Commands that mutate host state or need privileged access to a container.
    build, list, history and new-config are read-only, so they run as the calling
    user -- extra-container re-execs for everything."
-  #{"create" "add" "shell" "run" "destroy" "restart" "rollback"})
+  #{"create" "add" "shell" "run" "destroy" "start" "stop" "restart" "rollback"})
 
 (defn- reexec-as-root!
   "Re-run ourselves under sudo, preserving the variables the run depends on."

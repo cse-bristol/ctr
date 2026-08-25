@@ -78,6 +78,8 @@ ctr new-config <name> [--address-prefix <a.b.c>] [--network <nat|iface>] [--no-n
                [--state-version <ver>]
 ctr shell      <name> [--start] [--timeout <seconds>]
 ctr run        <name> [--start] [--timeout <seconds>] [--] <cmd> [<arg>...]
+ctr start      <container>...
+ctr stop       <container>...
 ctr restart    <container>...
 ctr destroy    <container>... | <config> | --all|-a
 ```
@@ -88,9 +90,9 @@ Run `ctr help` for the full option descriptions.
 reference, a store path from `ctr build`, or `-` (or omitted) to read from
 stdin.
 
-`create`, `shell`, `run`, `destroy`, `restart` and `rollback` re-run themselves
-under `sudo` when needed. `build`, `list`, `history` and `new-config` do not
-touch host state and run as you.
+`create`, `shell`, `run`, `destroy`, `start`, `stop`, `restart` and `rollback`
+re-run themselves under `sudo` when needed. `build`, `list`, `history` and
+`new-config` do not touch host state and run as you.
 
 ## Starting a container
 
@@ -155,17 +157,23 @@ $ ctr new-config web --network=br0
 }
 ```
 
-The container joins the interface's own subnet, at the lowest free host address
-ctr can find there. ctr skips the network base, `.1` (usually the router or
-gateway), the broadcast address, the host's own addresses on that interface,
-and any address another container is already bridged to. If the interface has
-no IPv4 address, or the subnet is exhausted, `--network` refuses to emit a
-config.
+The container joins the interface's own subnet, at a free host address ctr can
+find there. The search starts just above the host's own address and wraps round
+to the bottom of the subnet if it runs out, so the container lands next to the
+host rather than at the foot of the network: a host at `10.1.0.1/8` gives the
+container `10.1.0.2/8`, not `10.0.0.2/8`. ctr skips the network base, the `.1`
+above it (usually the router or gateway), the broadcast address, the host's own
+addresses on that interface, any address another container is already bridged
+to, and anything in the kernel's neighbour table for the interface. If the
+interface has no IPv4 address, or the subnet is exhausted, `--network` refuses
+to emit a config.
 
 Bridged containers share a real LAN, so anything else on it — devices ctr does
-not manage, DHCP — can still collide. ctr only guarantees no clash with the host
-and with its own containers; check the LAN before bringing a bridged container
-up.
+not manage, DHCP — can still collide. The neighbour table only records machines
+the host has talked to, so it rules addresses out and never rules one in. On a
+subnet wider than a `/24` ctr says so on stderr, since it can see so little of
+what is really out there; check the LAN, and any DHCP pool, before bringing a
+bridged container up.
 
 ```bash
 ctr new-config web > web.nix
@@ -201,6 +209,17 @@ sudo ctr run web -- systemctl status # run a command, and exit with its status
 Both need the container to be running; `--start` starts it first and waits.
 Everything after the container name — or after `--`, if the command's own flags
 would otherwise be ambiguous — is passed through untouched.
+
+```bash
+sudo ctr stop web db                # stop containers
+sudo ctr start web                  # and bring them back
+```
+
+`start` leaves containers that are already up alone, and `stop` does the same
+for ones already down; neither is an error. `stop` waits until the machine has
+actually gone rather than just until the unit reports inactive, which
+`systemctl stop` on its own does not guarantee (nixpkgs#43652) — the same
+reason `ctr restart` exists.
 
 ## Rolling back a deployment
 

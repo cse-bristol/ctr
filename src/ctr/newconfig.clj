@@ -112,15 +112,36 @@
   [s]
   (ip->long (str/replace s #"/.*$" "")))
 
+(defn neighbour-ips
+  "IPv4 addresses this host has seen on `iface`, from the kernel's ARP cache.
+   That is a record of who has been talked to, not a scan, so it under-reports
+   quiet machines: it can rule an address out, never rule one in."
+  [iface]
+  (->> (str/split-lines (:out (u/run "ip" "-4" "neigh" "show" "dev" iface)))
+       (keep #(re-find #"^\d+\.\d+\.\d+\.\d+" %))))
+
 (defn free-bridge-address
-  "Lowest free host address inside CIDR `cidr` for a bridged container, as a
-   bare dotted quad. The network base, its broadcast, the `.1` address
-   (conventionally a router or gateway) and the host's own addresses on the
-   interface are all skipped, as is any container already bridged there."
+  "A free address inside CIDR `cidr` for a bridged container, as a bare dotted
+   quad.
+
+   The scan starts just above the host's own address in `cidr` rather than at
+   the bottom of the network, and wraps round to the network base if it runs
+   out. On a /24 that is the same answer as counting up from the base; on a
+   wide network -- a host at 10.1.0.1/8, say -- it keeps the container next to
+   the host instead of stranding it 65k addresses away in 10.0.0.x.
+
+   The network base, the address above it (conventionally a router), the
+   broadcast, `host-ips` and `used-ips` are all skipped. `used-ips` is
+   everything else known to be spoken for: containers already bridged onto the
+   interface, and whatever the neighbour table has seen."
   [cidr used-ips host-ips]
-  (let [[base last] (cidr-range cidr)
-        used (set (concat (map ip4-long used-ips) (map ip4-long host-ips)))]
-    (or (some-> (first (filter #(not (used %)) (range (+ base 2) last)))
+  (let [[net last] (cidr-range cidr)
+        used   (set (concat (map ip4-long used-ips) (map ip4-long host-ips)))
+        lo     (+ net 2)
+        hi     (dec last)
+        anchor (let [a (inc (ip4-long cidr))] (if (<= lo a hi) a lo))]
+    (or (some-> (first (remove used (concat (range anchor (inc hi))
+                                            (range lo anchor))))
                 long->ip)
         (u/die (str "No free address in '" cidr "' to bridge a container onto.")))))
 
@@ -128,9 +149,20 @@
   "The address -- `ip/len` -- for a new container bridged to `iface`."
   [iface]
   (let [cidr (host-cidr-for iface)
-        len  (parse-long (or (second (str/split cidr #"/")) "32"))]
-    (str (free-bridge-address cidr (used-bridge-ips iface) (host-ips-on iface))
-         "/" len)))
+        len  (parse-long (or (second (str/split cidr #"/")) "32"))
+        ip   (free-bridge-address cidr
+                                  (concat (used-bridge-ips iface)
+                                          (neighbour-ips iface))
+                                  (host-ips-on iface))]
+    ;; A /24 is small enough that the confs plus the neighbour table are most of
+    ;; the picture. Anything wider is a real network ctr cannot see the whole of,
+    ;; so say so -- on stderr, since the config itself goes to stdout.
+    (when (< len 24)
+      (u/eprintln (str "warning: " iface " is a /" len ", so ctr cannot tell which of its"
+                       " addresses are free.\n         " ip " clashes with no container,"
+                       " no address on " iface " and nothing\n         in the neighbour"
+                       " table -- check it is outside any DHCP pool.")))
+    (str ip "/" len)))
 
 (defn- release-of
   "The nixpkgs release, read straight from its .version file -- which is what

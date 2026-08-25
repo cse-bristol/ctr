@@ -84,3 +84,26 @@
         (fs/create-dirs bare)
         (is (nil? (sd/nixos-version bare)))))
     (fs/delete-tree dir)))
+
+;; `systemctl stop` returns before the machine is necessarily gone, so the
+;; terminate is the part that matters -- and restart! must not lose it.
+(deftest stopping-a-container-waits-for-the-machine-to-go
+  (let [calls (atom [])
+        record (fn [& args] (swap! calls conj (vec (flatten args))) {:exit 0 :out "" :err ""})]
+    (with-redefs [ctr.util/check! record
+                  ctr.util/run   record]
+      (sd/stop-containers! ["web"])
+      (is (= [["systemctl" "stop" "container@web.service"]
+              ["machinectl" "terminate" "web"]]
+             @calls)))))
+
+(deftest restart-stops-terminates-then-starts
+  (let [calls (atom [])
+        record (fn [& args] (swap! calls conj (vec (flatten args))) {:exit 0 :out "" :err ""})]
+    (with-redefs [ctr.util/check! record
+                  ctr.util/run   record]
+      (sd/restart! ["web" "db"])
+      (is (= [["systemctl" "stop" "container@web.service" "container@db.service"]
+              ["machinectl" "terminate" "web" "db"]
+              ["systemctl" "start" "container@web.service" "container@db.service"]]
+             @calls)))))

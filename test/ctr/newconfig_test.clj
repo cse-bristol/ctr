@@ -66,10 +66,9 @@
     (is (not (str/includes? t "enableWAN")))
     (is (str/includes? t "autoStart = true;"))))
 
-(deftest the-template-is-a-nix-expression-that-evaluates
 (deftest free-bridge-address-picks-inside-the-subnet
   (is (= "192.168.1.2" (nc/free-bridge-address "192.168.1.0/24" [] [])))
-  (testing "the network base, .1 and the broadcast are never handed out"
+  (testing "the network base, the .1 above it and the broadcast are never handed out"
     (is (= "10.0.0.2" (nc/free-bridge-address "10.0.0.0/8" [] ["10.0.0.1"]))))
   (testing "the host's own address is skipped"
     (is (= "192.168.1.3" (nc/free-bridge-address "192.168.1.0/24" [] ["192.168.1.2"]))))
@@ -82,6 +81,33 @@
   (testing "a full network is an error, not a hang"
     (is (thrown? clojure.lang.ExceptionInfo
                  (nc/free-bridge-address "10.0.0.1/32" [] [])))))
+
+(deftest free-bridge-address-stays-next-to-the-host
+  ;; A host at 10.1.0.1/8 masks to the network 10.0.0.0/8, so counting up from
+  ;; the bottom of it used to suggest 10.0.0.2 -- valid, but 65k addresses away
+  ;; from everything the host can actually see.
+  (is (= "10.1.0.2" (nc/free-bridge-address "10.1.0.1/8" [] ["10.1.0.1"])))
+  (testing "and keeps counting up from there"
+    (is (= "10.1.0.4" (nc/free-bridge-address "10.1.0.1/8" ["10.1.0.2" "10.1.0.3"]
+                                              ["10.1.0.1"]))))
+  (testing "a host low in a /24 gives the same answer the bottom-up scan did"
+    (is (= "192.168.1.2" (nc/free-bridge-address "192.168.1.1/24" [] ["192.168.1.1"]))))
+  (testing "the scan wraps round rather than giving up above the host"
+    ;; 10.0.0.0/29 is .0-.7, so .2-.6 are the usable ones. With the host at .4
+    ;; and everything above it taken, the only answer is below the anchor.
+    (is (= "10.0.0.2" (nc/free-bridge-address "10.0.0.4/29"
+                                              ["10.0.0.5" "10.0.0.6"] ["10.0.0.4"])))
+    (testing "and a host on the broadcast-1 address still finds something"
+      (is (= "10.0.0.2" (nc/free-bridge-address "10.0.0.6/29" [] ["10.0.0.6"]))))))
+
+(deftest the-neighbour-table-rules-addresses-out
+  (with-redefs [ctr.util/run (fn [& _]
+                               {:exit 0 :out (str "10.1.0.2 dev br0 lladdr aa:bb FAILED\n"
+                                                  "10.1.0.3 dev br0 lladdr cc:dd REACHABLE")})]
+    (is (= ["10.1.0.2" "10.1.0.3"] (vec (nc/neighbour-ips "br0")))))
+  (testing "an interface with an empty table rules nothing out"
+    (with-redefs [ctr.util/run (fn [& _] {:exit 0 :out ""})]
+      (is (empty? (nc/neighbour-ips "br0"))))))
 
 (deftest the-template-bridges-onto-a-named-interface
   (let [t (nc/template (assoc opts :bridge "br0" :local "192.168.1.50/24"))]
@@ -97,6 +123,8 @@
                         (nc/generate "web" {:no-network true :network "br0"})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Cannot combine"
                         (nc/generate "web" {:address-prefix "10.1.2" :network "br0"}))))
+
+(deftest the-template-is-a-nix-expression-that-evaluates
   ;; Parsing alone is not enough: `<nixpkgs>/nixos` parses fine and fails only
   ;; on evaluation. Both forms of the template are checked.
   (if-not (fs/which "nix")
